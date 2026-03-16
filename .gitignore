@@ -223,3 +223,8 @@ MUJOCO_LOG.TXT
 examples/MultiRobot/*
 
 AGENTS.md
+
+
+experiments/*
+checkpoints/*
+results/*

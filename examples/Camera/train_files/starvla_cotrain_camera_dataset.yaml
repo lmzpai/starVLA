@@ -1,0 +1,166 @@
+run_id: QwenCamera_hstar_pano_chunk_size_4_history_stride_4_sample_stride_4_history_mode_random_gen_v2
+run_root_dir: checkpoints/QwenCamera_v2
+seed: 42
+trackers: [jsonl]
+wandb_entity: lmz666pai-peking-university
+wandb_project: starvla_ap_0316
+is_debug: false
+
+framework:
+  name: QwenCamera
+  qwenvl:
+    base_vlm: /share/project/zhouenshen/hpfs/ckpt/vlm/Qwen3-VL-4B-Instruct
+    attn_implementation: flash_attention_2
+    vl_hidden_dim: 2048
+  dino:
+    dino_backbone: dinov2_vits14
+  action_model:
+    action_model_type: DiT-B
+    hidden_size: 1024
+    add_pos_embed: True
+    max_seq_len: 1024
+    action_dim: 2
+    state_dim: 2
+    future_action_window_size: 3 # 15
+    action_horizon: 4 # 16
+    past_action_window_size: 0
+    repeated_diffusion_steps: 8
+    noise_beta_alpha: 1.5
+    noise_beta_beta: 1.0
+    noise_s: 0.999
+    num_timestep_buckets: 1000
+    num_inference_timesteps: 4
+    num_target_vision_tokens: 32
+    diffusion_model_cfg:
+      cross_attention_dim: 2048
+      dropout: 0.2
+      final_dropout: true
+      interleave_self_attention: true
+      norm_type: "ada_norm"
+      num_layers: 16
+      output_dim: 2560
+      positional_embeddings: null
+
+datasets:
+  vlm_data:
+    dataset_py: vlm_datasets
+    dataformat: llava_json
+    dataset_use: asv2_conversation_en,asv2_detailed_description_en,coco_karpathy_train_567_en,okvqa_en,vqav2_en
+    eval_dataset: aokvqa_cauldron_llava_format
+    data_flatten: false
+    base_interval: 2
+    max_pixels: 50176
+    min_pixels: 784
+    model_max_length: 2048
+    model_type: qwen2.5vl
+    per_device_batch_size: 4
+
+  vla_data:
+    dataset_py: lerobot_datasets
+    data_root_dir: /share/project/zhouenshen/hpfs/code/starVLA/playground/dataset/RoboTwin/RoboTwin_lerobot/Clean
+    data_mix: robotwin # bridge_rt_1
+    action_type: abs_qpos
+    default_image_resolution: [3, 224, 224]
+    per_device_batch_size: 16
+    load_all_data_for_training: true
+    obs: ["image_0"]
+    image_size: [224,224]
+    video_backend: torchvision_av
+
+  camera_data:
+    dataset_py: camera_datasets
+    dataset_use: hstar_pano_chunk_size_4_v2_dataset
+    preserve_image_size: true
+    image_size: null    # if preserve_image_size is true, image_size will be ignored
+    do_resize: false
+    max_history_images: 6
+    min_history_images: 1
+    history_mode: random
+    history_stride: 4     # 历史帧间隔采样步长  
+    sample_stride: 4      # 数据帧间隔采样步长
+    action_chunk_len: 4
+    action_dim: 2
+    state_dim: 2
+    include_state: false
+    video_backend: opencv
+    action_columns: [actions]
+    per_device_batch_size: 4
+    num_workers: 4
+
+    dataset_sources:
+      hstar_pano_chunk_size_4_v2_dataset:
+        dataset_type: hstar_pano_dataset
+        data_root_dir: /share/project/zhouenshen/sfs/dataset/ActivePerception/Pano/video_action_dataset/hstar_pano_chunk_size_4_v2
+        metadata_filename: metadata.json
+
+      # hstar_pano_extra_template:
+      #   dataset_type: hstar_pano_dataset
+      #   # 训练前把这里替换成你的第二份 camera 数据路径
+      #   # 如果第二份数据和第一份同格式，只改 data_root_dir / metadata_filename 就够了
+      #   data_root_dir: /share/project/zhouenshen/sfs/dataset/ActivePerception/Pano/video_action_dataset/hstar_pano
+      #   metadata_filename: metadata.json
+      #   # 这里演示 source 级别覆盖；不需要的话可以删掉，继续继承 camera_data 公共默认值
+      #   history_mode: random
+      #   max_history_images: 9
+      #   sample_stride: 1
+
+trainer:
+  epochs: 100
+  max_train_steps: 1000000
+  num_warmup_steps: 5000
+  save_interval: 5000
+  save_interval_epochs: 1
+  eval_interval: 100
+  learning_rate:
+    base: 1.0e-05
+    qwen_vl_interface: 1.0e-05
+    action_model: 1.0e-04
+  lr_scheduler_type: cosine_with_min_lr
+  scheduler_specific_kwargs:
+    min_lr: 5.0e-07
+  freeze_modules: ''
+  loss_scale:
+    vla: 1.0
+    vlm: 0.1
+  repeated_diffusion_steps: 4
+  max_grad_norm: 1.0
+  warmup_ratio: 0.1
+  weight_decay: 0.0
+  logging_frequency: 10
+  gradient_clipping: 1.0
+  gradient_accumulation_steps: 8
+  optimizer:
+    name: AdamW
+    betas: [0.9, 0.95]
+    eps: 1.0e-08
+    weight_decay: 1.0e-08
+  is_resume: false
+  resume_epoch: null
+  resume_step: null
+  enable_gradient_checkpointing: true
+  enable_mixed_precision_training: true
+
+  auto_hstar_eval:
+    # 是否开启自动评测
+    enabled: true
+    # 训练进程调用评测脚本时使用的 Python
+    python_bin: /share/project/lmz/miniconda3/envs/starVLA_ap/bin/python3
+    # 串行评测脚本（建议使用 part 配置）
+    eval_script: /share/project/zhouenshen/hpfs/code/ActivePerception/starVLA/examples/Camera/eval_files/eval_during_training/eval_hstar_vla.py
+    # 评测配置模板（会自动注入 output_dir 并生成临时配置）
+    eval_config: /share/project/zhouenshen/hpfs/code/ActivePerception/starVLA/examples/Camera/eval_files/eval_during_training/hstar_eval_during_training.yaml
+    # 自动拉起 policy server（每次评测结束后自动关闭）
+    server_script: /share/project/zhouenshen/hpfs/code/ActivePerception/starVLA/deployment/model_server/server_policy.py
+    server_python_bin: /share/project/lmz/miniconda3/envs/starVLA_ap/bin/python3
+    server_use_bf16: true
+    server_idle_timeout: -1
+    server_start_timeout_sec: 300
+    server_start_poll_interval_sec: 1.0
+    # 评测用哪张卡（对应 CUDA_VISIBLE_DEVICES）；如不填则使用当前可见默认 GPU
+    server_gpu_id: 7
+    # 可选：评测结果根目录（默认 <训练输出目录>/auto_eval）
+    output_root: /share/project/zhouenshen/hpfs/code/ActivePerception/starVLA/results/auto_eval
+    # 可选：超时时间（秒）；null 表示不限制
+    timeout_sec: null
+    # 将 summary.json 里的关键指标记录到 wandb
+    log_to_wandb: true

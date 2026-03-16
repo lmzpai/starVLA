@@ -1,0 +1,47 @@
+output_dir: results/auto_eval
+
+dataset:
+  root: /share/project/zhouenshen/sfs/dataset/ActivePerception/Pano/data_source/hstar_bench_mini
+  benches: ["hos", "hps"]
+  auto_generate_val_parquet: false
+  # parquet_test_size_by_bench:
+  #   hos: 2400
+  #   hps: 1600
+  seed: 42
+  max_episodes: null
+  init_pitch: 0.0
+  hps_default_initial_yaws: [0.0, 90.0, 180.0, 270.0]
+
+server:
+  host: 127.0.0.1
+  port: 10002
+
+policy:
+  action_chunk_size: 4
+  infer_action_num: 4
+  stop_zero_tail: 4
+  stop_zero_eps: 0.05
+
+rollout:
+  max_inference_rounds: 10
+  history_max_frames: 8
+
+tolerance:
+  hos:
+    yaw_tolerance: 30.0
+    pitch_tolerance: 20.0
+  hps:
+    yaw_tolerance: 10.0
+    pitch_tolerance: 20.0
+
+camera:
+  pano_max_long_side: 2048
+  front_width: 512
+  front_height: 384
+  fov_deg: 90.0
+  fx: null
+  draw_center_cross: false #true
+
+visualization:
+  enable: true
+  video_fps: 20

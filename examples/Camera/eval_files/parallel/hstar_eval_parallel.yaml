@@ -1,0 +1,44 @@
+eval_config_path: /share/project/zhouenshen/hpfs/code/ActivePerception/starVLA/examples/Camera/eval_files/hstar_eval.yaml
+
+mp_start_method: spawn
+
+model_servers:
+  # external: 使用你已手动启动的 server
+  # launch: 按 gpu_model_plan 自动拉起多个 server_policy.py
+  mode: launch
+  host: 127.0.0.1
+
+  # 仅 mode=external 生效
+  endpoints: []
+  # 例如:
+  # endpoints:
+  #   - "127.0.0.1:10093"
+  #   - "127.0.0.1:10094"
+
+  # 仅 mode=launch 生效
+  python_bin: /share/project/lmz/miniconda3/envs/starVLA_ap/bin/python3
+  server_script: /share/project/zhouenshen/hpfs/code/ActivePerception/starVLA/deployment/model_server/server_policy.py
+  ckpt_path: /share/project/zhouenshen/hpfs/code/ActivePerception/starVLA/results/QwenCamera_v1/QwenCamera_hstar_pano_chunk_size_2_history_stride_2_sample_stride_2_history_mode_random/checkpoints/epoch_5_pytorch_model.pt
+  use_bf16: true
+  idle_timeout: -1
+  auto_shutdown: true
+  startup_timeout_sec: 500
+  startup_poll_interval_sec: 2.0
+
+  gpu_model_plan:
+    - gpu_id: 0
+      num_models: 6
+    - gpu_id: 1
+      num_models: 6
+    # - gpu_id: 2
+    #   num_models: 3
+    # - gpu_id: 3
+    #   num_models: 3
+    # - gpu_id: 4
+    #   num_models: 3
+    # - gpu_id: 5
+    #   num_models: 3
+    # - gpu_id: 6
+    #   num_models: 3
+    # - gpu_id: 7
+    #   num_models: 3
