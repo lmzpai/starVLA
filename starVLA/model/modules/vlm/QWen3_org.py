@@ -66,25 +66,6 @@ class _QWen3_VL_Interface(nn.Module):
         self.processor = processor
         self.config = config
 
-        # NOTE(zhouenshen): support high-resolution VLA inputs.
-        # Allow overriding pixel limits for high-resolution VLA inputs.
-        # Prefer vla_data overrides; fall back to vlm_data if present.
-        if hasattr(self.config, "datasets"):
-            vla_cfg = getattr(self.config.datasets, "vla_data", None)
-            vlm_cfg = getattr(self.config.datasets, "vlm_data", None)
-            max_pixels = getattr(vla_cfg, "max_pixels", None) if vla_cfg is not None else None
-            min_pixels = getattr(vla_cfg, "min_pixels", None) if vla_cfg is not None else None
-            if max_pixels is None and vlm_cfg is not None:
-                max_pixels = getattr(vlm_cfg, "max_pixels", None)
-            if min_pixels is None and vlm_cfg is not None:
-                min_pixels = getattr(vlm_cfg, "min_pixels", None)
-            if max_pixels is not None and hasattr(self.processor, "image_processor"):
-                self.processor.image_processor.max_pixels = int(max_pixels)
-                self.processor.image_processor.size["longest_edge"] = int(max_pixels)
-            if min_pixels is not None and hasattr(self.processor, "image_processor"):
-                self.processor.image_processor.min_pixels = int(min_pixels)
-                self.processor.image_processor.size["shortest_edge"] = int(min_pixels)
-
         # alin qwen3 with qwen2.5
         self.model.config.hidden_size = self.model.config.text_config.hidden_size
 
@@ -131,11 +112,6 @@ class _QWen3_VL_Interface(nn.Module):
         Build model inputs from raw data (images + instructions + optional solutions).
         Follow Oficial Qwen3-VL Instruct format: https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct
         """
-        # NOTE(zhouenshen): add camera action prompt to solutions.
-        if solutions is not None and hasattr(self.config, "datasets") and hasattr(self.config.datasets, "vla_data"):
-            camera_prompt = getattr(self.config.datasets.vla_data, "camera_action_prompt", None)
-            if camera_prompt:
-                solutions = [str(camera_prompt) + str(solution) for solution in solutions]
 
         # Create messages: one message per sample
         messages = []
@@ -161,72 +137,40 @@ class _QWen3_VL_Interface(nn.Module):
                 solution = solutions[len(messages)]
                 msg.append({"role": "assistant", "content": [{"type": "text", "text": solution}]})
             messages.append(msg)
+
         # Preparation for inference
 
         batch_inputs = self.processor.apply_chat_template(
-            messages,
-            tokenize=True,
-            padding=True,
-            add_generation_prompt=True,
-            return_dict=True,
-            return_tensors="pt"
+        messages,
+        tokenize=True,
+        padding=True,
+        add_generation_prompt=True,
+        return_dict=True,
+        return_tensors="pt"
         )
+
         # if solutions, mask out the solution tokens in labels
-        # if solutions is not None: #  here only for fast_tokenizer now. 
-        #     action_token_min = _ACTION_TOKEN_MIN # how can we know this range? --> we has other way for this, but is slower see qwenhelix branch
-        #     action_token_max = _ACTION_TOKEN_MAX # here only for fast_tokenizer, see starVLA/model/modules/vlm/tools/add_qwen_special_tokens/README.md
-        #     labels = batch_inputs['input_ids'].clone()
-        #     # For each sequence in the batch, find the first occurrence of an action token.
-        #     for i in range(labels.size(0)):
-        #         seq = labels[i]
-        #         # Create a mask for tokens within the action token range.
-        #         mask_seq = (seq >= action_token_min) & (seq <= action_token_max)
-        #         nonzero_indices = torch.nonzero(mask_seq, as_tuple=False)
-        #         if nonzero_indices.numel() > 0:
-        #             first_action_index = nonzero_indices[0].item()
-        #             # Mask out all tokens before the first action token.
-        #             seq[:first_action_index] = IGNORE_INDEX
-        #         else:
-        #             # If no action token is found, mask the entire sequence.
-        #             seq[:] = IGNORE_INDEX
-        #             RuntimeWarning (f"action token are on in yout tokenizer, plz see starVLA/model/modules/vlm/tools/add_qwen_special_tokens/README.md.")
-        #     import ipdb; ipdb.set_trace()
-        #     labels[labels == self.processor.tokenizer.pad_token_id] = IGNORE_INDEX ## mask out pad tokens as well
-        #     batch_inputs['labels'] = labels
-
-
-        # NOTE(zhouenshen): supervise assistant response tokens beyond action tokens.
-        # if solutions, only supervise assistant response tokens.
-        # This keeps system/user tokens masked while training both "Rotate(...)" text
-        # and any following action tokens inside the assistant span.
-        if solutions is not None:
-            labels = torch.full_like(batch_inputs["input_ids"], IGNORE_INDEX)
-            for i, msg in enumerate(messages):
-                user_only_msg = [msg[0]]
-                prefix_inputs = self.processor.apply_chat_template(
-                    [user_only_msg],
-                    tokenize=True,
-                    padding=False,
-                    add_generation_prompt=True,
-                    return_dict=True,
-                    return_tensors="pt",
-                )
-                full_inputs = self.processor.apply_chat_template(
-                    [msg],
-                    tokenize=True,
-                    padding=False,
-                    add_generation_prompt=False,
-                    return_dict=True,
-                    return_tensors="pt",
-                )
-
-                start = min(prefix_inputs["input_ids"].shape[1], labels.shape[1])
-                end = min(full_inputs["input_ids"].shape[1], labels.shape[1])
-                if end > start:
-                    labels[i, start:end] = batch_inputs["input_ids"][i, start:end]
-
-            labels[batch_inputs["input_ids"] == self.processor.tokenizer.pad_token_id] = IGNORE_INDEX
-            batch_inputs["labels"] = labels
+        if solutions is not None: #  here only for fast_tokenizer now. 
+            action_token_min = _ACTION_TOKEN_MIN # how can we know this range? --> we has other way for this, but is slower see qwenhelix branch
+            action_token_max = _ACTION_TOKEN_MAX # here only for fast_tokenizer, see starVLA/model/modules/vlm/tools/add_qwen_special_tokens/README.md
+            labels = batch_inputs['input_ids'].clone()
+            # For each sequence in the batch, find the first occurrence of an action token.
+            for i in range(labels.size(0)):
+                seq = labels[i]
+                # Create a mask for tokens within the action token range.
+                mask_seq = (seq >= action_token_min) & (seq <= action_token_max)
+                nonzero_indices = torch.nonzero(mask_seq, as_tuple=False)
+                if nonzero_indices.numel() > 0:
+                    first_action_index = nonzero_indices[0].item()
+                    # Mask out all tokens before the first action token.
+                    seq[:first_action_index] = IGNORE_INDEX
+                else:
+                    # If no action token is found, mask the entire sequence.
+                    seq[:] = IGNORE_INDEX
+                    RuntimeWarning (f"action token are on in yout tokenizer, plz see starVLA/model/modules/vlm/tools/add_qwen_special_tokens/README.md.")
+            
+            labels[labels == self.processor.tokenizer.pad_token_id] = -100 ## mask out pad tokens as well
+            batch_inputs['labels'] = labels
 
         return batch_inputs.to(self.model.device)
 

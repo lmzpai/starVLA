@@ -1,9 +1,9 @@
-run_id: QwenCamera_hstar_pano_chunk_size_4_history_stride_4_sample_stride_4_history_mode_random_gen_v2
+run_id: QwenCamera_chunk_size_4_history_stride_4_sample_stride_4_history_mode_max_gen_v2_norm_90_to_1_ca1m+hstar-l_4B
 run_root_dir: checkpoints/QwenCamera_v2
 seed: 42
 trackers: [jsonl]
 wandb_entity: lmz666pai-peking-university
-wandb_project: starvla_ap_0316
+wandb_project: starvla_ap_0318
 is_debug: false
 
 framework:
@@ -69,13 +69,13 @@ datasets:
 
   camera_data:
     dataset_py: camera_datasets
-    dataset_use: hstar_pano_chunk_size_4_v2_dataset
+    dataset_use: ca1m_pano_chunk_size_4_v2_norm_45_to_1,hstar_pano_chunk_size_4_v2_norm_45_to_1_large
     preserve_image_size: true
     image_size: null    # if preserve_image_size is true, image_size will be ignored
     do_resize: false
-    max_history_images: 6
+    max_history_images: 8
     min_history_images: 1
-    history_mode: random
+    history_mode: max # random
     history_stride: 4     # 历史帧间隔采样步长  
     sample_stride: 4      # 数据帧间隔采样步长
     action_chunk_len: 4
@@ -88,21 +88,26 @@ datasets:
     num_workers: 4
 
     dataset_sources:
-      hstar_pano_chunk_size_4_v2_dataset:
-        dataset_type: hstar_pano_dataset
-        data_root_dir: /share/project/zhouenshen/sfs/dataset/ActivePerception/Pano/video_action_dataset/hstar_pano_chunk_size_4_v2
-        metadata_filename: metadata.json
+        #   hstar_pano_chunk_size_4_v2_dataset:
+        #     dataset_type: hstar_pano_dataset
+        #     data_root_dir: /share/project/zhouenshen/sfs/dataset/ActivePerception/Pano/video_action_dataset/hstar_pano_chunk_size_4_v2
+        #     metadata_filename: metadata.json
 
-      # hstar_pano_extra_template:
-      #   dataset_type: hstar_pano_dataset
-      #   # 训练前把这里替换成你的第二份 camera 数据路径
-      #   # 如果第二份数据和第一份同格式，只改 data_root_dir / metadata_filename 就够了
-      #   data_root_dir: /share/project/zhouenshen/sfs/dataset/ActivePerception/Pano/video_action_dataset/hstar_pano
-      #   metadata_filename: metadata.json
-      #   # 这里演示 source 级别覆盖；不需要的话可以删掉，继续继承 camera_data 公共默认值
-      #   history_mode: random
-      #   max_history_images: 9
-      #   sample_stride: 1
+        # hstar_pano_chunk_size_1_v2_norm_90_to_1_dataset:
+        #     dataset_type: hstar_pano_dataset
+        #     data_root_dir: /share/project/zhouenshen/sfs/dataset/ActivePerception/Pano/video_action_dataset/hstar_pano_chunk_size_1_v2_norm_90_to_1
+        #     metadata_filename: metadata.json
+
+        ca1m_pano_chunk_size_4_v2_norm_45_to_1:
+            dataset_type: hstar_pano_dataset
+            data_root_dir: /share/project/zhouenshen/sfs/dataset/ActivePerception/Pano/video_action_dataset/ca1m_pano_chunk_size_4_v2_norm_45_to_1
+            metadata_filename: metadata.json
+
+        hstar_pano_chunk_size_4_v2_norm_45_to_1_large:
+            dataset_type: hstar_pano_dataset
+            data_root_dir: /share/project/zhouenshen/sfs/dataset/ActivePerception/Pano/video_action_dataset/hstar_pano_chunk_size_4_v2_norm_45_to_1_large
+            metadata_filename: metadata.json
+
 
 trainer:
   epochs: 100
@@ -134,18 +139,19 @@ trainer:
     betas: [0.9, 0.95]
     eps: 1.0e-08
     weight_decay: 1.0e-08
-  is_resume: false
+  is_resume: true
   resume_epoch: null
   resume_step: null
   enable_gradient_checkpointing: true
   enable_mixed_precision_training: true
 
+
   auto_hstar_eval:
     # 是否开启自动评测
-    enabled: true
+    enabled: false
     # 训练进程调用评测脚本时使用的 Python
     python_bin: /share/project/lmz/miniconda3/envs/starVLA_ap/bin/python3
-    # 串行评测脚本（建议使用 part 配置）
+    # 串行评测脚本（建议使用 eval_during_training 配置）
     eval_script: /share/project/zhouenshen/hpfs/code/ActivePerception/starVLA/examples/Camera/eval_files/eval_during_training/eval_hstar_vla.py
     # 评测配置模板（会自动注入 output_dir 并生成临时配置）
     eval_config: /share/project/zhouenshen/hpfs/code/ActivePerception/starVLA/examples/Camera/eval_files/eval_during_training/hstar_eval_during_training.yaml
@@ -157,7 +163,7 @@ trainer:
     server_start_timeout_sec: 300
     server_start_poll_interval_sec: 1.0
     # 评测用哪张卡（对应 CUDA_VISIBLE_DEVICES）；如不填则使用当前可见默认 GPU
-    server_gpu_id: 7
+    server_gpu_id: 0
     # 可选：评测结果根目录（默认 <训练输出目录>/auto_eval）
     output_root: /share/project/zhouenshen/hpfs/code/ActivePerception/starVLA/results/auto_eval
     # 可选：超时时间（秒）；null 表示不限制

@@ -71,7 +71,8 @@ def get_action_model(config=None):
     Returns:
         ActionModel: Initialized diffusion action head.
     """
-    action_model = Fast_Action_Tokenizer()
+    tokenizer = getattr(config.framework.action_model, "tokenizer", "physical-intelligence/fast")
+    action_model = Fast_Action_Tokenizer(fast_tokenizer_name=tokenizer)
 
     return action_model
 
