@@ -80,14 +80,14 @@ def prepare_data(cfg, accelerator, output_dir) -> DataLoader:
     dataset = camera_train_dataloader.dataset
     if hasattr(dataset, "get_dataset_summary_for_log"):
         summary = dataset.get_dataset_summary_for_log()
-        accelerator.print("[Data] 当前使用的数据集及样本数量：")
+        accelerator.print("[Data] Current dataset and sample count:")
         for name, count in summary:
-            accelerator.print(f"  - {name}: {count} 条样本")
+            accelerator.print(f"  - {name}: {count} samples")
         total = len(dataset)
-        accelerator.print(f"[Data] 总样本数量: {total}")
+        accelerator.print(f"[Data] Total sample count: {total}")
     else:
         num_samples = len(dataset)
-        accelerator.print(f"[Data] 总样本数量: {num_samples}")
+        accelerator.print(f"[Data] Total sample count: {num_samples}")
 
     accelerator.dataloader_config.dispatch_batches = False
     dist.barrier()
@@ -252,6 +252,13 @@ class VLATrainer(TrainerUtils):
             summary_data = {"steps": self.completed_steps}
             if save_as_epoch is not None:
                 summary_data["epoch"] = save_as_epoch
+            
+            if isinstance(self.config, AccessTrackedConfig):
+                logger.info("📊 Saving accessed configuration...")
+                output_dir = Path(self.config.output_dir)
+                self.config.save_accessed_config(output_dir / "config.yaml", use_original_values=False)
+                logger.info("✅ Configuration files saved")
+
             auto_eval_summary = self._run_auto_hstar_eval_if_enabled(
                 checkpoint_file_path=checkpoint_file_path,
                 checkpoint_name=checkpoint_name,
@@ -262,11 +269,164 @@ class VLATrainer(TrainerUtils):
                 f.write(json.dumps(summary_data) + "\n")
             self.accelerator.print(f"✅ Checkpoint saved at {checkpoint_path}")
 
-            if isinstance(self.config, AccessTrackedConfig):
-                logger.info("📊 Saving accessed configuration...")
-                output_dir = Path(self.config.output_dir)
-                self.config.save_accessed_config(output_dir / "config.yaml", use_original_values=False)
-                logger.info("✅ Configuration files saved")
+        self.accelerator.wait_for_everyone()
+
+    def _log_metrics(self, metrics):
+        """Record training metrics."""
+        if self.completed_steps % self.config.trainer.logging_frequency == 0 and dist.get_rank() == 0:
+            metrics["learning_rate"] = self.lr_scheduler.get_last_lr()[0]
+            metrics["epoch"] = round(self.completed_steps / len(self.vla_train_dataloader), 2)
+            wandb.log(metrics, step=self.completed_steps)
+            logger.info(f"Step {self.completed_steps}, Loss: {metrics})")
+
+    def _create_data_iterators(self):
+        """Create data iterators."""
+        self.vla_iter = iter(self.vla_train_dataloader)
+
+    def _get_next_batch(self):
+        """Get next batch (automatically handle data loop)."""
+        try:
+            batch_vla = next(self.vla_iter)
+        except StopIteration:
+            if not hasattr(self, "vla_epoch_count"):
+                self.vla_epoch_count = 0
+            self.vla_iter, self.vla_epoch_count = TrainerUtils._reset_dataloader(
+                self.vla_train_dataloader, self.vla_epoch_count
+            )
+            batch_vla = next(self.vla_iter)
+
+        return batch_vla
+
+    def train(self):
+        """Execute training loop."""
+        self._log_training_config()
+        self._create_data_iterators()
+        progress_bar = tqdm(
+            range(self.config.trainer.max_train_steps), disable=not self.accelerator.is_local_main_process
+        )
+
+        while self.completed_steps < self.config.trainer.max_train_steps:
+            t_start_data = time.perf_counter()
+            batch_vla = self._get_next_batch()
+            t_end_data = time.perf_counter()
+
+            t_start_model = time.perf_counter()
+            step_metrics = self._train_step(batch_vla)
+            t_end_model = time.perf_counter()
+
+            if self.accelerator.sync_gradients:
+                progress_bar.update(1)
+                self.completed_steps += 1
+
+            if self.accelerator.is_local_main_process:
+                progress_bar.set_postfix(
+                    {
+                        "data_times": f"{t_end_data - t_start_data:.3f}",
+                        "model_times": f"{t_end_model - t_start_model:.3f}",
+                    }
+                )
+
+            if self.completed_steps % self.config.trainer.eval_interval == 0:
+                step_metrics = self.eval_action_model(step_metrics)
+
+            step_metrics["data_time"] = t_end_data - t_start_data
+            step_metrics["model_time"] = t_end_model - t_start_model
+            self._log_metrics(step_metrics)
+
+            if self.completed_steps % self.config.trainer.save_interval == 0 and self.completed_steps > 0:
+                self._save_checkpoint()
+
+            save_interval_epochs = getattr(self.config.trainer, "save_interval_epochs", None)
+            if save_interval_epochs is not None and save_interval_epochs > 0:
+                steps_per_epoch = max(
+                    1,
+                    len(self.vla_train_dataloader) // self.accelerator.gradient_accumulation_steps,
+                )
+                current_epoch = (self.completed_steps + 1) // steps_per_epoch
+                if (
+                    (self.completed_steps + 1) % steps_per_epoch == 0
+                    and current_epoch > 0
+                    and current_epoch % save_interval_epochs == 0
+                    and current_epoch != self._last_saved_epoch
+                ):
+                    self._last_saved_epoch = current_epoch
+                    self._save_checkpoint(save_as_epoch=current_epoch)
+
+            if self.completed_steps >= self.config.trainer.max_train_steps:
+                break
+
+        self._finalize_training()
+
+    def eval_action_model(self, step_metrics: dict = None) -> float:
+        """Run simple action-eval on current batch and attach score to metrics."""
+        examples = self._get_next_batch()
+        actions = [example["action"] for example in examples]
+        output_dict = self.model.predict_action(examples=examples, use_ddim=True, num_ddim_steps=20)
+
+        if self.accelerator.is_main_process:
+            normalized_actions = output_dict["normalized_actions"]
+            actions = np.array(actions)
+            num_pots = np.prod(actions.shape)
+            score = TrainerUtils.euclidean_distance(normalized_actions, actions)
+            step_metrics["mse_score"] = score / num_pots
+
+        del examples
+        dist.barrier()
+        return step_metrics
+
+    def _log_training_config(self):
+        """Record training config."""
+        if self.accelerator.is_main_process:
+            logger.info("***** Training Configuration *****")
+            logger.info(f"  Total optimization steps = {self.config.trainer.max_train_steps}")
+            logger.info(f"  Per device batch size = {self.config.datasets.camera_data.per_device_batch_size}")
+            logger.info(f"  Gradient accumulation steps = {self.config.trainer.gradient_accumulation_steps}")
+            logger.info(f"  Total batch size = {self.total_batch_size}")
+            logger.info(f"  Save every N steps = {self.config.trainer.save_interval}")
+            save_interval_epochs = getattr(self.config.trainer, "save_interval_epochs", None)
+            logger.info(f"  Save every N epochs = {save_interval_epochs if save_interval_epochs else 'disabled'}")
+
+    def _train_step(self, batch_vla, batch_vlm=None):
+        """Execute single training step."""
+        with self.accelerator.accumulate(self.model):
+            self.optimizer.zero_grad()
+
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                output_dict = self.model.forward(batch_vla)
+                action_loss = output_dict["action_loss"]
+                total_loss = action_loss
+
+            self.accelerator.backward(total_loss)
+
+            if self.config.trainer.gradient_clipping is not None:
+                self.accelerator.clip_grad_norm_(self.model.parameters(), self.config.trainer.gradient_clipping)
+
+            self.optimizer.step()
+            self.lr_scheduler.step()
+
+        return {
+            "action_dit_loss": action_loss.item(),
+        }
+
+    def _finalize_training(self):
+        """Training end processing."""
+        if self.accelerator.is_main_process:
+            save_format = getattr(self.config.trainer, "save_format", "pt")
+            final_checkpoint = os.path.join(self.config.output_dir, "final_model")
+            os.makedirs(final_checkpoint, exist_ok=True)
+            state_dict = self.accelerator.get_state_dict(self.model)
+            if save_format == "safetensors":
+                from safetensors.torch import save_file
+
+                save_file(state_dict, os.path.join(final_checkpoint, "model.safetensors"))
+            elif save_format == "pt":
+                torch.save(state_dict, os.path.join(final_checkpoint, "pytorch_model.pt"))
+            else:
+                raise ValueError(f"Unsupported save_format `{save_format}`. Expected `pt` or `safetensors`.")
+            logger.info(f"Training complete. Final model saved at {final_checkpoint}")
+
+        if self.accelerator.is_main_process:
+            wandb.finish()
 
         self.accelerator.wait_for_everyone()
 
@@ -287,6 +447,7 @@ class VLATrainer(TrainerUtils):
                 except OSError:
                     time.sleep(poll_interval_sec)
         raise TimeoutError(f"Policy server not ready in time: {host}:{port}")
+
 
     def _terminate_subprocess(self, proc: subprocess.Popen, name: str) -> None:
         if proc.poll() is not None:
@@ -463,165 +624,6 @@ class VLATrainer(TrainerUtils):
         finally:
             if server_proc is not None:
                 self._terminate_subprocess(server_proc, "auto-eval policy server")
-
-    def _log_metrics(self, metrics):
-        """Record training metrics."""
-        if self.completed_steps % self.config.trainer.logging_frequency == 0 and dist.get_rank() == 0:
-            metrics["learning_rate"] = self.lr_scheduler.get_last_lr()[0]
-            metrics["epoch"] = round(self.completed_steps / len(self.vla_train_dataloader), 2)
-            wandb.log(metrics, step=self.completed_steps)
-            logger.info(f"Step {self.completed_steps}, Loss: {metrics})")
-
-    def _create_data_iterators(self):
-        """Create data iterators."""
-        self.vla_iter = iter(self.vla_train_dataloader)
-
-    def _get_next_batch(self):
-        """Get next batch (automatically handle data loop)."""
-        try:
-            batch_vla = next(self.vla_iter)
-        except StopIteration:
-            if not hasattr(self, "vla_epoch_count"):
-                self.vla_epoch_count = 0
-            self.vla_iter, self.vla_epoch_count = TrainerUtils._reset_dataloader(
-                self.vla_train_dataloader, self.vla_epoch_count
-            )
-            batch_vla = next(self.vla_iter)
-
-        return batch_vla
-
-    def train(self):
-        """Execute training loop."""
-        self._log_training_config()
-        self._create_data_iterators()
-        progress_bar = tqdm(
-            range(self.config.trainer.max_train_steps), disable=not self.accelerator.is_local_main_process
-        )
-
-        while self.completed_steps < self.config.trainer.max_train_steps:
-            t_start_data = time.perf_counter()
-            batch_vla = self._get_next_batch()
-            t_end_data = time.perf_counter()
-
-            t_start_model = time.perf_counter()
-            step_metrics = self._train_step(batch_vla)
-            t_end_model = time.perf_counter()
-
-            if self.accelerator.sync_gradients:
-                progress_bar.update(1)
-                self.completed_steps += 1
-
-            if self.accelerator.is_local_main_process:
-                progress_bar.set_postfix(
-                    {
-                        "data_times": f"{t_end_data - t_start_data:.3f}",
-                        "model_times": f"{t_end_model - t_start_model:.3f}",
-                    }
-                )
-
-            if self.completed_steps % self.config.trainer.eval_interval == 0:
-                step_metrics = self.eval_action_model(step_metrics)
-
-            step_metrics["data_time"] = t_end_data - t_start_data
-            step_metrics["model_time"] = t_end_model - t_start_model
-            self._log_metrics(step_metrics)
-
-            if self.completed_steps % self.config.trainer.save_interval == 0 and self.completed_steps > 0:
-                self._save_checkpoint()
-
-            save_interval_epochs = getattr(self.config.trainer, "save_interval_epochs", None)
-            if save_interval_epochs is not None and save_interval_epochs > 0:
-                steps_per_epoch = max(
-                    1,
-                    len(self.vla_train_dataloader) // self.accelerator.gradient_accumulation_steps,
-                )
-                current_epoch = (self.completed_steps + 1) // steps_per_epoch
-                if (
-                    (self.completed_steps + 1) % steps_per_epoch == 0
-                    and current_epoch > 0
-                    and current_epoch % save_interval_epochs == 0
-                    and current_epoch != self._last_saved_epoch
-                ):
-                    self._last_saved_epoch = current_epoch
-                    self._save_checkpoint(save_as_epoch=current_epoch)
-
-            if self.completed_steps >= self.config.trainer.max_train_steps:
-                break
-
-        self._finalize_training()
-
-    def eval_action_model(self, step_metrics: dict = None) -> float:
-        """Run simple action-eval on current batch and attach score to metrics."""
-        examples = self._get_next_batch()
-        actions = [example["action"] for example in examples]
-        output_dict = self.model.predict_action(examples=examples, use_ddim=True, num_ddim_steps=20)
-
-        if self.accelerator.is_main_process:
-            normalized_actions = output_dict["normalized_actions"]
-            actions = np.array(actions)
-            num_pots = np.prod(actions.shape)
-            score = TrainerUtils.euclidean_distance(normalized_actions, actions)
-            step_metrics["mse_score"] = score / num_pots
-
-        del examples
-        dist.barrier()
-        return step_metrics
-
-    def _log_training_config(self):
-        """Record training config."""
-        if self.accelerator.is_main_process:
-            logger.info("***** Training Configuration *****")
-            logger.info(f"  Total optimization steps = {self.config.trainer.max_train_steps}")
-            logger.info(f"  Per device batch size = {self.config.datasets.camera_data.per_device_batch_size}")
-            logger.info(f"  Gradient accumulation steps = {self.config.trainer.gradient_accumulation_steps}")
-            logger.info(f"  Total batch size = {self.total_batch_size}")
-            logger.info(f"  Save every N steps = {self.config.trainer.save_interval}")
-            save_interval_epochs = getattr(self.config.trainer, "save_interval_epochs", None)
-            logger.info(f"  Save every N epochs = {save_interval_epochs if save_interval_epochs else 'disabled'}")
-
-    def _train_step(self, batch_vla, batch_vlm=None):
-        """Execute single training step."""
-        with self.accelerator.accumulate(self.model):
-            self.optimizer.zero_grad()
-
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                output_dict = self.model.forward(batch_vla)
-                action_loss = output_dict["action_loss"]
-                total_loss = action_loss
-
-            self.accelerator.backward(total_loss)
-
-            if self.config.trainer.gradient_clipping is not None:
-                self.accelerator.clip_grad_norm_(self.model.parameters(), self.config.trainer.gradient_clipping)
-
-            self.optimizer.step()
-            self.lr_scheduler.step()
-
-        return {
-            "action_dit_loss": action_loss.item(),
-        }
-
-    def _finalize_training(self):
-        """Training end processing."""
-        if self.accelerator.is_main_process:
-            save_format = getattr(self.config.trainer, "save_format", "pt")
-            final_checkpoint = os.path.join(self.config.output_dir, "final_model")
-            os.makedirs(final_checkpoint, exist_ok=True)
-            state_dict = self.accelerator.get_state_dict(self.model)
-            if save_format == "safetensors":
-                from safetensors.torch import save_file
-
-                save_file(state_dict, os.path.join(final_checkpoint, "model.safetensors"))
-            elif save_format == "pt":
-                torch.save(state_dict, os.path.join(final_checkpoint, "pytorch_model.pt"))
-            else:
-                raise ValueError(f"Unsupported save_format `{save_format}`. Expected `pt` or `safetensors`.")
-            logger.info(f"Training complete. Final model saved at {final_checkpoint}")
-
-        if self.accelerator.is_main_process:
-            wandb.finish()
-
-        self.accelerator.wait_for_everyone()
 
 
 def main(cfg) -> None:

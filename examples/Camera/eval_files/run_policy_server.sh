@@ -6,7 +6,7 @@ set -euo pipefail
 
 export PYTHONPATH="$(pwd):${PYTHONPATH:-}" # let examples import deployment tools
 export star_vla_python="/share/project/lmz/miniconda3/envs/starVLA_ap/bin/python3"
-your_ckpt=/share/project/zhouenshen/hpfs/code/ActivePerception/starVLA/checkpoints/QwenCamera_v1/QwenCamera_hstar_pano_chunk_size_2_history_stride_2_sample_stride_2_history_mode_random/checkpoints/epoch_5_pytorch_model.pt
+your_ckpt=/share/project/zhouenshen/hpfs/code/ActivePerception/starVLA/checkpoints/QwenCamera_v2/QwenCamera_hstar_pano_chunk_size_4_history_stride_4_sample_stride_4_history_mode_random_gen_v2/checkpoints/epoch_1_pytorch_model.pt
 gpu_id=0
 port=10002
 ################# star Policy Server ######################

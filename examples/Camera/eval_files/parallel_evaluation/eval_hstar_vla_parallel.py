@@ -35,7 +35,7 @@ from examples.Camera.eval_files.hstar_env import (
 )
 from deployment.model_server.tools.websocket_policy_client import WebsocketClientPolicy
 
-ACTION_MAX_MAG_RAD = float(4.0 * np.pi)
+ACTION_MAX_MAG_RAD = 1
 
 
 @dataclass
@@ -263,7 +263,7 @@ def _run_worker_eval(
                 action_chunk=action_chunk,
                 infer_action_num=cfg.policy.infer_action_num,
                 tail=cfg.policy.stop_zero_tail,
-                eps=cfg.policy.stop_zero_eps,
+                eps_deg=cfg.policy.stop_zero_eps_deg,
             ):
                 action_trace_by_round.append(
                     {
@@ -838,7 +838,7 @@ def _run_worker_eval(
                 action_chunk=action_chunk,
                 infer_action_num=cfg.policy.infer_action_num,
                 tail=cfg.policy.stop_zero_tail,
-                eps=cfg.policy.stop_zero_eps,
+                eps_deg=cfg.policy.stop_zero_eps_deg,
             ):
                 action_trace_by_round.append(
                     {
@@ -1413,7 +1413,7 @@ def _run_worker_eval(
                 action_chunk=action_chunk,
                 infer_action_num=cfg.policy.infer_action_num,
                 tail=cfg.policy.stop_zero_tail,
-                eps=cfg.policy.stop_zero_eps,
+                eps_deg=cfg.policy.stop_zero_eps_deg,
             ):
                 action_trace_by_round.append(
                     {

@@ -43,6 +43,21 @@ def _source_cfg_get(source_cfg, global_cfg, key, default=None):
     return default
 
 
+def _infer_num_steps_from_metadata(item: dict) -> Optional[int]:
+    candidate_keys = ("frame_count", "num_steps", "action_length", "num_actions", "length")
+    for key in candidate_keys:
+        value = item.get(key, None)
+        if value is None:
+            continue
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    return None
+
+
 def _normalize_action_matrix(
     parquet_path: Path,
     action_dim: Optional[int] = None,
@@ -137,6 +152,10 @@ class _HStarPanoSourceDataset(Dataset):
         self.history_stride = max(1, int(_source_cfg_get(source_cfg, global_cfg, "history_stride", 1)))
         self.sample_stride = max(1, int(_source_cfg_get(source_cfg, global_cfg, "sample_stride", 1)))
         self.preserve_image_size = _to_bool(_source_cfg_get(source_cfg, global_cfg, "preserve_image_size", True), default=True)
+        self.skip_file_existence_check = _to_bool(
+            _source_cfg_get(source_cfg, global_cfg, "skip_file_existence_check", False),
+            default=False,
+        )
 
         image_size = _source_cfg_get(source_cfg, global_cfg, "image_size", None)
         self.image_size = tuple(image_size) if image_size is not None else None
@@ -149,21 +168,26 @@ class _HStarPanoSourceDataset(Dataset):
         self.items = raw_items if isinstance(raw_items, list) else [raw_items]
 
         self.valid_items = []
-        self.sample_index = []
+        self.item_sample_counts = []
+        self.cumulative_sample_counts = []
         self._action_cache = {}
+        running = 0
 
         for item in self.items:
             video_path = self.root / item["video_path"]
             action_path = self.root / item["action_path"]
-            if not video_path.exists() or not action_path.exists():
+            if not self.skip_file_existence_check and (not video_path.exists() or not action_path.exists()):
                 continue
 
-            action_matrix = _normalize_action_matrix(action_path, action_dim=self.action_dim, action_columns=self.action_columns)
-            if action_matrix.shape[0] <= 0:
-                continue
-
-            frame_count = int(item.get("frame_count", action_matrix.shape[0]))
-            effective_len = min(frame_count, action_matrix.shape[0])
+            effective_len = _infer_num_steps_from_metadata(item)
+            if effective_len is None or effective_len <= 0:
+                # Fallback for incomplete metadata. This is slower, but keeps compatibility.
+                action_matrix = _normalize_action_matrix(
+                    action_path,
+                    action_dim=self.action_dim,
+                    action_columns=self.action_columns,
+                )
+                effective_len = int(action_matrix.shape[0])
             if effective_len <= 0:
                 continue
 
@@ -172,13 +196,14 @@ class _HStarPanoSourceDataset(Dataset):
             packed["_action_path"] = action_path
             packed["_num_steps"] = effective_len
             self.valid_items.append(packed)
-            valid_item_idx = len(self.valid_items) - 1
 
-            for step_idx in range(0, effective_len, self.sample_stride):
-                self.sample_index.append((valid_item_idx, step_idx))
+            sample_count = (effective_len + self.sample_stride - 1) // self.sample_stride
+            self.item_sample_counts.append(sample_count)
+            running += sample_count
+            self.cumulative_sample_counts.append(running)
 
     def __len__(self) -> int:
-        return len(self.sample_index)
+        return self.cumulative_sample_counts[-1] if self.cumulative_sample_counts else 0
 
     def _load_action_matrix(self, item: dict) -> np.ndarray:
         action_path = item["_action_path"]
@@ -253,9 +278,21 @@ class _HStarPanoSourceDataset(Dataset):
         return np.asarray(state_values[: self.state_dim], dtype=np.float16).reshape(1, -1)
 
     def __getitem__(self, index: int) -> dict:
-        item_idx, step_idx = self.sample_index[index]
+        if index < 0:
+            index = len(self) + index
+        if index < 0 or index >= len(self):
+            raise IndexError(f"Index {index} out of range for dataset of size {len(self)}")
+        item_idx = bisect.bisect_right(self.cumulative_sample_counts, index)
+        prev_cum = 0 if item_idx == 0 else self.cumulative_sample_counts[item_idx - 1]
+        sample_idx = index - prev_cum
+        step_idx = sample_idx * self.sample_stride
+
         item = self.valid_items[item_idx]
         action_matrix = self._load_action_matrix(item)
+        if action_matrix.shape[0] <= 0:
+            raise RuntimeError(f"Action matrix is empty for {item['_action_path']}")
+        # Metadata length may be stale; clamp to valid range.
+        step_idx = min(step_idx, action_matrix.shape[0] - 1)
 
         task_names = item.get("task_names", [])
 

@@ -17,10 +17,10 @@ server:
   port: 10002
 
 policy:
-  action_chunk_size: 2
-  infer_action_num: 2
-  stop_zero_tail: 2
-  stop_zero_eps: 0.05
+  action_chunk_size: 1
+  infer_action_num: 1
+  stop_zero_tail: 1
+  stop_zero_eps_deg: 2
 
 rollout:
   max_inference_rounds: 10
@@ -40,8 +40,8 @@ camera:
   front_height: 384
   fov_deg: 90.0
   fx: null
-  draw_center_cross: false #true
+  draw_center_cross: true
 
 visualization:
   enable: true
-  video_fps: 20
+  video_fps: 1

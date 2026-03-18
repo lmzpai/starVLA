@@ -21,8 +21,8 @@ from examples.Camera.eval_files.hstar_env import (
 )
 from deployment.model_server.tools.websocket_policy_client import WebsocketClientPolicy
 
-ACTION_MAX_MAG_RAD = float(4.0 * np.pi)
-PANO_DELTA_MAX_DEG = 180.0
+ACTION_MAX_MAG_RAD = 1
+PANO_DELTA_MAX_DEG = 90
 
 
 def action_space_to_pano_delta_deg(actions: np.ndarray) -> np.ndarray:
@@ -59,8 +59,9 @@ class ServerConfig:
 class PolicyConfig:
     action_chunk_size: int = 4
     infer_action_num: int = 4
-    stop_zero_tail: int = 8
-    stop_zero_eps: float = 0.05
+    stop_zero_tail: int = 4
+    # 单位：度。语义：若尾部 tail 个动作在 yaw/pitch 两个维度上的绝对值都 <= eps，则提前停止。
+    stop_zero_eps_deg: float = 2.25
 
 
 @dataclass
@@ -135,7 +136,7 @@ def should_stop_by_zero_tail(
     action_chunk: np.ndarray,
     infer_action_num: int,
     tail: int,
-    eps: float,
+    eps_deg: float,
 ) -> bool:
     """
     判断是否根据“尾部接近 0”提前停止。
@@ -159,7 +160,8 @@ def should_stop_by_zero_tail(
     tail_actions = exec_actions[-tail_len:, :]  # (tail_len, 2)
 
     # 要求尾部所有动作在两个维度上都“几乎为 0”
-    return bool(np.all(np.abs(tail_actions) <= float(eps)))
+    tail_actions_deg = action_space_to_pano_delta_deg(tail_actions)
+    return bool(np.all(np.abs(tail_actions_deg) <= float(eps_deg)))
 
 
 def _save_keyframes(frames: list[np.ndarray], out_dir: Path) -> list[str]:
@@ -304,7 +306,7 @@ def run_eval(cfg: EvalConfig) -> None:
                 action_chunk=action_chunk,
                 infer_action_num=cfg.policy.infer_action_num,
                 tail=cfg.policy.stop_zero_tail,
-                eps=cfg.policy.stop_zero_eps,
+                eps_deg=cfg.policy.stop_zero_eps_deg,
             ):
                 # 对于 stop_by_zero_tail 的情况，也先把模型本轮预测的动作记录到 metadata 里，
                 # 但不实际执行（exec_num 记为 0，state_after_action 为空）。
